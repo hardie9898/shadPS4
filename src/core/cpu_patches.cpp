@@ -1323,7 +1323,7 @@ static void TryPatchAot(void* code_address, u64 code_size) {
 
     const auto* end = code + code_size;
     while (code < end) {
-        code += TryPatch(code, module, false).second;
+        code += TryPatch(code, module).second;
     }
 }
 
