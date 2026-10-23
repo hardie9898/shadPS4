@@ -539,17 +539,16 @@ static void GenerateEXTRQ(void* /* address */, const ZydisDecodedInstruction&,
         c.popfq();
         c.lea(rsp, ptr[rsp + 128]);
     }
-}
-static void GenerateBEXTR(void* /* address */, const ZydisDecodedOperand* operands,
+}static void GenerateBEXTR(void* /* address */, const ZydisDecodedOperand* operands,
                           Xbyak::CodeGenerator& c) {
     ASSERT_MSG(operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER, "operand 0 must be a register");
     ASSERT_MSG(operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER, "operand 1 must be a register");
     ASSERT_MSG(operands[2].type == ZYDIS_OPERAND_TYPE_REGISTER, "operand 2 must be a register");
 
-    // Map the operands to Xbyak 64-bit general purpose registers
-    Xbyak::Reg64 dst = *reinterpret_cast<const Xbyak::Reg64*>(&ZydisToXbyakRegisterOperand(operands[0]));
-    Xbyak::Reg64 src = *reinterpret_cast<const Xbyak::Reg64*>(&ZydisToXbyakRegisterOperand(operands[1]));
-    Xbyak::Reg64 cnt = *reinterpret_cast<const Xbyak::Reg64*>(&ZydisToXbyakRegisterOperand(operands[2]));
+    // Extract the raw register IDs using Xbyak helper interfaces safely without raw pointers
+    Xbyak::Reg64 dst(ZydisToXbyakRegisterOperand(operands[0]).getIdx());
+    Xbyak::Reg64 src(ZydisToXbyakRegisterOperand(operands[1]).getIdx());
+    Xbyak::Reg64 cnt(ZydisToXbyakRegisterOperand(operands[2]).getIdx());
 
     Xbyak::Label length_zero, end_patch;
 
@@ -840,7 +839,8 @@ static const std::unordered_map<ZydisMnemonic, std::vector<PatchInfo>> Patches =
     {ZYDIS_MNEMONIC_VRSQRTPS, {{FilterIntelCPU, GenerateVRSQRTPS, true}}},
     {ZYDIS_MNEMONIC_RCPPS, {{FilterIntelCPU, GenerateRCPPS, true}}},
     {ZYDIS_MNEMONIC_VRCPPS, {{FilterIntelCPU, GenerateVRCPPS, true}}},
-    {ZYDIS_MNEMONIC_BEXTR, {{FilterNoBmi1, GenerateBEXTR, true}}},
+    {ZYDIS_MNEMONIC_BEXTR, {PatchInfo{FilterNoBmi1, GenerateBEXTR, true}}},
+
 
 #if defined(__APPLE__)
     // Rosetta 2
