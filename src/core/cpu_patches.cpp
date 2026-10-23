@@ -263,6 +263,11 @@ static bool FilterNoSSE4a(const ZydisDecodedOperand*) {
     Cpu cpu;
     return !cpu.has(Cpu::tSSE4a);
 }
+static bool FilterNoBmi1(const ZydisDecodedOperand*) {
+    Cpu cpu;
+    return !cpu.has(Cpu::tBMI1);
+}
+
 
 static bool FilterIntelCPU(const ZydisDecodedOperand*) {
 #if defined(__APPLE__)
@@ -535,6 +540,59 @@ static void GenerateEXTRQ(void* /* address */, const ZydisDecodedInstruction&,
         c.lea(rsp, ptr[rsp + 128]);
     }
 }
+static void GenerateBEXTR(void* /* address */, const ZydisDecodedOperand* operands,
+                          Xbyak::CodeGenerator& c) {
+    ASSERT_MSG(operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER, "operand 0 must be a register");
+    ASSERT_MSG(operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER, "operand 1 must be a register");
+    ASSERT_MSG(operands[2].type == ZYDIS_OPERAND_TYPE_REGISTER, "operand 2 must be a register");
+
+    // Map the operands to Xbyak 64-bit general purpose registers
+    Xbyak::Reg64 dst = *reinterpret_cast<const Xbyak::Reg64*>(&ZydisToXbyakRegisterOperand(operands[0]));
+    Xbyak::Reg64 src = *reinterpret_cast<const Xbyak::Reg64*>(&ZydisToXbyakRegisterOperand(operands[1]));
+    Xbyak::Reg64 cnt = *reinterpret_cast<const Xbyak::Reg64*>(&ZydisToXbyakRegisterOperand(operands[2]));
+
+    Xbyak::Label length_zero, end_patch;
+
+    // 1. Move stack pointer past Windows Red Zone and preserve temporary scratch registers
+    c.lea(rsp, ptr[rsp - 128]);
+    c.pushfq();
+    c.push(rax);
+    c.push(rcx);
+
+    // 2. Extract Length (bits 8-15 of control register)
+    c.mov(rax, cnt);
+    c.shr(rax, 8);
+    c.and_(rax, 0xFF); // rax now holds length
+    c.jz(length_zero);
+
+    // 3. Create the bitmask dynamic constraint: mask = (1ULL << length) - 1
+    c.mov(rcx, rax);   // cl now holds length
+    c.mov(rax, 1);
+    c.shl(rax, cl);
+    c.dec(rax);        // rax now holds the completed bitmask
+    c.jmp(end_patch);
+
+    c.L(length_zero);
+    c.xor_(rax, rax);  // if length is 0, the final output must be 0
+
+    c.L(end_patch);
+
+    // 4. Extract Start Index (bits 0-7 of control register)
+    c.mov(rcx, cnt);
+    c.and_(rcx, 0xFF); // cl now contains the start index shift amount
+
+    // 5. Perform extraction: destination = (src >> start_index) & mask
+    c.mov(dst, src);
+    c.shr(dst, cl);
+    c.and_(dst, rax);
+
+    // 6. Restore scratch registers and reset stack allocation
+    c.pop(rcx);
+    c.pop(rax);
+    c.popfq();
+    c.lea(rsp, ptr[rsp + 128]);
+}
+
 
 static void GenerateINSERTQ(void* /* address */, const ZydisDecodedInstruction&,
                             const ZydisDecodedOperand* operands, Xbyak::CodeGenerator& c) {
@@ -782,6 +840,7 @@ static const std::unordered_map<ZydisMnemonic, std::vector<PatchInfo>> Patches =
     {ZYDIS_MNEMONIC_VRSQRTPS, {{FilterIntelCPU, GenerateVRSQRTPS, true}}},
     {ZYDIS_MNEMONIC_RCPPS, {{FilterIntelCPU, GenerateRCPPS, true}}},
     {ZYDIS_MNEMONIC_VRCPPS, {{FilterIntelCPU, GenerateVRCPPS, true}}},
+    {ZYDIS_MNEMONIC_BEXTR, {{FilterNoBmi1, GenerateBEXTR, true}}},
 
 #if defined(__APPLE__)
     // Rosetta 2
