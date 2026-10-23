@@ -39,6 +39,12 @@
 #include <pthread.h>
 #include <sys/ucontext.h>
 #endif
+//changes made by hardie BEGINS HERE
+// Fallback allocation context for dynamic runtime memory regions (Outside any class or struct)
+static Xbyak::CodeGenerator fallback_patch_gen{4096};
+static Xbyak::CodeGenerator fallback_trampoline_gen{65536};
+static std::set<u8*> fallback_patched_set;
+// ENDS HERE
 
 CMRC_DECLARE(res);
 
@@ -977,10 +983,7 @@ struct PatchModule {
     Xbyak::CodeGenerator trampoline_gen;
     // Fallback allocation context for dynamic runtime memory 
     // changes made by harde BEGINS HERE
-    static Xbyak::CodeGenerator fallback_patch_gen{4096};
-    static Xbyak::CodeGenerator fallback_trampoline_gen{65536};
-    static bool fallback_trampoline_exhausted = false;
-    static std::set<u8*> fallback_patched_set
+    
     // ENDS HERE
 
 
@@ -1028,7 +1031,6 @@ static std::pair<bool, u64> TryPatch(u8* code, PatchModule* module) {
     ZydisDecodedInstruction instruction;
     ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
     
-    // Safety check: Use module boundaries if available, otherwise assume max x86 instruction length (15 bytes)
     u64 max_len = module ? (module->end - code) : 15;
     const auto status = Common::Decoder::Instance()->decodeInstruction(instruction, operands, code, max_len);
     if (!ZYAN_SUCCESS(status)) {
@@ -1041,20 +1043,13 @@ static std::pair<bool, u64> TryPatch(u8* code, PatchModule* module) {
             bool needs_trampoline = patch_info.trampoline;
             if (patch_info.filter(operands)) {
                 
-                // Select active module generator or fall back to global instances
                 auto& patch_gen = module ? module->patch_gen : fallback_patch_gen;
-                bool trampoline_exhausted = module ? module->trampoline_exhausted : fallback_trampoline_exhausted;
                 auto& patched_set = module ? module->patched : fallback_patched_set;
 
                 if (needs_trampoline && instruction.length < NearJumpSize) {
                     return std::make_pair(false, instruction.length);
                 }
 
-                if (needs_trampoline && trampoline_exhausted) {
-                    return std::make_pair(false, instruction.length);
-                }
-
-                // Reset compiler state and synchronize positions
                 patch_gen.reset();
                 patch_gen.setSize(code - patch_gen.getCode());
 
@@ -1067,9 +1062,6 @@ static std::pair<bool, u64> TryPatch(u8* code, PatchModule* module) {
                         trampoline_gen.jmp(code + instruction.length);
                     } catch (const Xbyak::Error& error) {
                         trampoline_gen.setSize(trampoline_offset);
-                        if (module && HandleTrampolineError(module, error)) {
-                            return std::make_pair(false, instruction.length);
-                        }
                         return std::make_pair(false, instruction.length);
                     }
 
@@ -1088,8 +1080,6 @@ static std::pair<bool, u64> TryPatch(u8* code, PatchModule* module) {
                     patch_gen.nop(instruction.length - patch_size);
                     patched_set.insert(code);
                     
-                    LOG_DEBUG(Core, "Patched dynamic instruction '{}' at: {}",
-                              ZydisMnemonicGetString(instruction.mnemonic), fmt::ptr(code));
                     return std::make_pair(true, instruction.length);
                 }
             }
@@ -1098,6 +1088,7 @@ static std::pair<bool, u64> TryPatch(u8* code, PatchModule* module) {
 
     return std::make_pair(false, instruction.length);
 }
+
 
 // ENDS HERE
 static bool Is4ByteExtrqOrInsertq(void* code_address) {
@@ -1304,11 +1295,9 @@ static bool TryPatchJit(void* code_address) {
     auto* code = static_cast<u8*>(code_address);
     auto* module = GetModule(code);
     if (module == nullptr) {
-        // Double check if this exact address was already handled in fallback memory
         if (fallback_patched_set.find(code) != fallback_patched_set.end()) {
             return true;
         }
-        // Force evaluation on dynamic memory segments
         return TryPatch(code, nullptr).first;
     }
 
@@ -1320,6 +1309,7 @@ static bool TryPatchJit(void* code_address) {
 
     return TryPatch(code, module).first;
 }
+
 // ENDS HERE
 
 static void TryPatchAot(void* code_address, u64 code_size) {
