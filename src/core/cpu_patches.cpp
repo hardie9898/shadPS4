@@ -539,7 +539,9 @@ static void GenerateEXTRQ(void* /* address */, const ZydisDecodedInstruction&,
         c.popfq();
         c.lea(rsp, ptr[rsp + 128]);
     }
-}static void GenerateBEXTR(void* /* address */, const ZydisDecodedInstruction& /* instruction */,
+}
+// BEGINNING OF BEXTR FAMILY INSRTUCTIONS AND ITS HANDLING
+static void GenerateBEXTR(void* /* address */, const ZydisDecodedInstruction& /* instruction */,
                           const ZydisDecodedOperand* operands, Xbyak::CodeGenerator& c) {
     ASSERT_MSG(operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER, "operand 0 must be a register");
     ASSERT_MSG(operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER, "operand 1 must be a register");
@@ -590,7 +592,83 @@ static void GenerateEXTRQ(void* /* address */, const ZydisDecodedInstruction&,
     c.pop(rax);
     c.popfq();
     c.lea(rsp, ptr[rsp + 128]);
+}static void GenerateBLSR(void* /* address */, const ZydisDecodedInstruction& /* instruction */,
+                          const ZydisDecodedOperand* operands, Xbyak::CodeGenerator& c) {
+    ASSERT_MSG(operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER, "operand 0 must be a register");
+    ASSERT_MSG(operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER, "operand 1 must be a register");
+
+    const auto dst_op = ZydisToXbyakRegisterOperand(operands[0]);
+    const auto src_op = ZydisToXbyakRegisterOperand(operands[1]);
+
+    // Handle 64-bit registers (e.g., rbx) vs 32-bit registers (e.g., ebx)
+    if (dst_op.isREG(64)) {
+        Xbyak::Reg64 dst(dst_op.getIdx());
+        Xbyak::Reg64 src(src_op.getIdx());
+
+        c.mov(dst, src);
+        c.dec(dst);
+        c.and_(dst, src);
+    } else {
+        Xbyak::Reg32 dst(dst_op.getIdx());
+        Xbyak::Reg32 src(src_op.getIdx());
+
+        c.mov(dst, src);
+        c.dec(dst);
+        c.and_(dst, src);
+    }
+}static void GenerateBLSI(void* /* address */, const ZydisDecodedInstruction& /* instruction */,
+                          const ZydisDecodedOperand* operands, Xbyak::CodeGenerator& c) {
+    ASSERT_MSG(operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER, "operand 0 must be a register");
+    ASSERT_MSG(operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER, "operand 1 must be a register");
+
+    const auto dst_op = ZydisToXbyakRegisterOperand(operands[0]);
+    const auto src_op = ZydisToXbyakRegisterOperand(operands[1]);
+
+    // BLSI dest, src -> dest = (-src) & src
+    if (dst_op.isREG(64)) {
+        Xbyak::Reg64 dst(dst_op.getIdx());
+        Xbyak::Reg64 src(src_op.getIdx());
+        c.mov(dst, src);
+        c.neg(dst);
+        c.and_(dst, src);
+    } else {
+        Xbyak::Reg32 dst(dst_op.getIdx());
+        Xbyak::Reg32 src(src_op.getIdx());
+        c.mov(dst, src);
+        c.neg(dst);
+        c.and_(dst, src);
+    }
 }
+
+static void GenerateANDN(void* /* address */, const ZydisDecodedInstruction& /* instruction */,
+                          const ZydisDecodedOperand* operands, Xbyak::CodeGenerator& c) {
+    ASSERT_MSG(operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER, "operand 0 must be a register");
+    ASSERT_MSG(operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER, "operand 1 must be a register");
+    ASSERT_MSG(operands[2].type == ZYDIS_OPERAND_TYPE_REGISTER, "operand 2 must be a register");
+
+    const auto dst_op = ZydisToXbyakRegisterOperand(operands[0]);
+    const auto src1_op = ZydisToXbyakRegisterOperand(operands[1]);
+    const auto src2_op = ZydisToXbyakRegisterOperand(operands[2]);
+
+    // ANDN dest, src1, src2 -> dest = (~src1) & src2
+    if (dst_op.isREG(64)) {
+        Xbyak::Reg64 dst(dst_op.getIdx());
+        Xbyak::Reg64 src1(src1_op.getIdx());
+        Xbyak::Reg64 src2(src2_op.getIdx());
+        c.mov(dst, src1);
+        c.not_(dst);
+        c.and_(dst, src2);
+    } else {
+        Xbyak::Reg32 dst(dst_op.getIdx());
+        Xbyak::Reg32 src1(src1_op.getIdx());
+        Xbyak::Reg32 src2(src2_op.getIdx());
+        c.mov(dst, src1);
+        c.not_(dst);
+        c.and_(dst, src2);
+    }
+}
+//END OF BEXTR FAMILY INSTRUCTION AND ITS HANDLING
+
 
 
 static void GenerateINSERTQ(void* /* address */, const ZydisDecodedInstruction&,
@@ -839,7 +917,12 @@ static const std::unordered_map<ZydisMnemonic, std::vector<PatchInfo>> Patches =
     {ZYDIS_MNEMONIC_VRSQRTPS, {{FilterIntelCPU, GenerateVRSQRTPS, true}}},
     {ZYDIS_MNEMONIC_RCPPS, {{FilterIntelCPU, GenerateRCPPS, true}}},
     {ZYDIS_MNEMONIC_VRCPPS, {{FilterIntelCPU, GenerateVRCPPS, true}}},
-    {ZYDIS_MNEMONIC_BEXTR, {PatchInfo{FilterNoBmi1, GenerateBEXTR, true}}},
+    // BEXTR FAMILY INSTRUCTION HANDLING
+    {ZYDIS_MNEMONIC_BEXTR, std::vector<PatchInfo>{PatchInfo{FilterNoBmi1, GenerateBEXTR, true}}},
+    {ZYDIS_MNEMONIC_BLSR, std::vector<PatchInfo>{PatchInfo{FilterNoBmi1, GenerateBLSR, false}}},
+    {ZYDIS_MNEMONIC_BLSI, std::vector<PatchInfo>{PatchInfo{FilterNoBmi1, GenerateBLSI, false}}},
+    {ZYDIS_MNEMONIC_ANDN, std::vector<PatchInfo>{PatchInfo{FilterNoBmi1, GenerateANDN, false}}},
+
 
 
 #if defined(__APPLE__)
