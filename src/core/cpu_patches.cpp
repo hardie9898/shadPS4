@@ -539,8 +539,8 @@ static void GenerateEXTRQ(void* /* address */, const ZydisDecodedInstruction&,
         c.popfq();
         c.lea(rsp, ptr[rsp + 128]);
     }
-}static void GenerateBEXTR(void* /* address */, const ZydisDecodedOperand* operands,
-                          Xbyak::CodeGenerator& c) {
+}static void GenerateBEXTR(void* /* address */, const ZydisDecodedInstruction& /* instruction */,
+                          const ZydisDecodedOperand* operands, Xbyak::CodeGenerator& c) {
     ASSERT_MSG(operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER, "operand 0 must be a register");
     ASSERT_MSG(operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER, "operand 1 must be a register");
     ASSERT_MSG(operands[2].type == ZYDIS_OPERAND_TYPE_REGISTER, "operand 2 must be a register");
