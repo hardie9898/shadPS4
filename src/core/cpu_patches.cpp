@@ -975,6 +975,14 @@ struct PatchModule {
 
     /// Code generator for writing trampoline patches.
     Xbyak::CodeGenerator trampoline_gen;
+    // Fallback allocation context for dynamic runtime memory 
+    // changes made by harde BEGINS HERE
+    static Xbyak::CodeGenerator fallback_patch_gen{4096};
+    static Xbyak::CodeGenerator fallback_trampoline_gen{65536};
+    static bool fallback_trampoline_exhausted = false;
+    static std::set<u8*> fallback_patched_set
+    // ENDS HERE
+
 
     /// Prevents repeated generation attempts after the fixed trampoline area is exhausted.
     bool trampoline_exhausted{};
@@ -1015,11 +1023,14 @@ static PatchModule* GetContainingModule(const void* ptr) {
 
 /// Returns a boolean indicating whether the instruction was patched, and the offset to advance past
 /// whatever is at the current code pointer.
-static std::pair<bool, u64> TryPatch(u8* code, PatchModule* module, bool allow_trampoline = true) {
+// change by hardie BEGINS HERE
+static std::pair<bool, u64> TryPatch(u8* code, PatchModule* module) {
     ZydisDecodedInstruction instruction;
     ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
-    const auto status = Common::Decoder::Instance()->decodeInstruction(instruction, operands, code,
-                                                                       module->end - code);
+    
+    // Safety check: Use module boundaries if available, otherwise assume max x86 instruction length (15 bytes)
+    u64 max_len = module ? (module->end - code) : 15;
+    const auto status = Common::Decoder::Instance()->decodeInstruction(instruction, operands, code, max_len);
     if (!ZYAN_SUCCESS(status)) {
         return std::make_pair(false, 1);
     }
@@ -1029,41 +1040,39 @@ static std::pair<bool, u64> TryPatch(u8* code, PatchModule* module, bool allow_t
         for (const auto& patch_info : patches) {
             bool needs_trampoline = patch_info.trampoline;
             if (patch_info.filter(operands)) {
-                auto& patch_gen = module->patch_gen;
+                
+                // Select active module generator or fall back to global instances
+                auto& patch_gen = module ? module->patch_gen : fallback_patch_gen;
+                bool trampoline_exhausted = module ? module->trampoline_exhausted : fallback_trampoline_exhausted;
+                auto& patched_set = module ? module->patched : fallback_patched_set;
 
                 if (needs_trampoline && instruction.length < NearJumpSize) {
-                    // Trampoline is needed but instruction is too short to patch.
-                    // Return false and length to signal to AOT compilation that this instruction
-                    // should be skipped and handled at runtime.
                     return std::make_pair(false, instruction.length);
                 }
 
-                if (needs_trampoline && (!allow_trampoline || module->trampoline_exhausted)) {
+                if (needs_trampoline && trampoline_exhausted) {
                     return std::make_pair(false, instruction.length);
                 }
 
-                // Reset state and move to current code position.
+                // Reset compiler state and synchronize positions
                 patch_gen.reset();
                 patch_gen.setSize(code - patch_gen.getCode());
 
                 if (needs_trampoline) {
-                    auto& trampoline_gen = module->trampoline_gen;
+                    auto& trampoline_gen = module ? module->trampoline_gen : fallback_trampoline_gen;
                     const size_t trampoline_offset = trampoline_gen.getSize();
                     const auto trampoline_ptr = trampoline_gen.getCurr();
                     try {
                         patch_info.generator(code, instruction, operands, trampoline_gen);
-
-                        // Return to the following instruction at the end of the trampoline.
                         trampoline_gen.jmp(code + instruction.length);
                     } catch (const Xbyak::Error& error) {
                         trampoline_gen.setSize(trampoline_offset);
-                        if (HandleTrampolineError(module, error)) {
+                        if (module && HandleTrampolineError(module, error)) {
                             return std::make_pair(false, instruction.length);
                         }
-                        throw;
+                        return std::make_pair(false, instruction.length);
                     }
 
-                    // Replace instruction with near jump to the trampoline.
                     patch_gen.jmp(trampoline_ptr, Xbyak::CodeGenerator::LabelType::T_NEAR);
                 } else {
                     patch_info.generator(code, instruction, operands, patch_gen);
@@ -1076,11 +1085,10 @@ static std::pair<bool, u64> TryPatch(u8* code, PatchModule* module, bool allow_t
                                ZydisMnemonicGetString(instruction.mnemonic), instruction.length,
                                fmt::ptr(code));
 
-                    // Fill remaining space with nops.
                     patch_gen.nop(instruction.length - patch_size);
-
-                    module->patched.insert(code);
-                    LOG_DEBUG(Core, "Patched instruction '{}' at: {}",
+                    patched_set.insert(code);
+                    
+                    LOG_DEBUG(Core, "Patched dynamic instruction '{}' at: {}",
                               ZydisMnemonicGetString(instruction.mnemonic), fmt::ptr(code));
                     return std::make_pair(true, instruction.length);
                 }
@@ -1091,6 +1099,7 @@ static std::pair<bool, u64> TryPatch(u8* code, PatchModule* module, bool allow_t
     return std::make_pair(false, instruction.length);
 }
 
+// ENDS HERE
 static bool Is4ByteExtrqOrInsertq(void* code_address) {
     u8* bytes = (u8*)code_address;
     if (bytes[0] == 0x66 && bytes[1] == 0x0F && bytes[2] == 0x79) {
@@ -1290,23 +1299,28 @@ static bool TryExecuteIllegalInstruction(void* ctx, void* code_address) {
 
     UNREACHABLE();
 }
-
+// change by hardie9898 BEGINS HERE
 static bool TryPatchJit(void* code_address) {
     auto* code = static_cast<u8*>(code_address);
-    auto* module = GetContainingModule(code);
+    auto* module = GetModule(code);
     if (module == nullptr) {
-        return false;
+        // Double check if this exact address was already handled in fallback memory
+        if (fallback_patched_set.find(code) != fallback_patched_set.end()) {
+            return true;
+        }
+        // Force evaluation on dynamic memory segments
+        return TryPatch(code, nullptr).first;
     }
 
     std::unique_lock lock{module->mutex};
 
-    // Return early if already patched, in case multiple threads signaled at the same time.
     if (std::ranges::find(module->patched, code) != module->patched.end()) {
         return true;
     }
 
     return TryPatch(code, module).first;
 }
+// ENDS HERE
 
 static void TryPatchAot(void* code_address, u64 code_size) {
     auto* code = static_cast<u8*>(code_address);
@@ -2640,11 +2654,12 @@ RedZonePatchResult PatchCpuInstructionsStatically(u64 segment_addr, u64 segment_
 // ============================================================================
 // End Windows static guest red-zone protection
 // ============================================================================
-
+// Replaced the older PatchesAccessViolationHandler with new one
+// changes made by hardie BEGINS HERE
 static bool PatchesAccessViolationHandler(void* context, void* /* fault_address */) {
     return TryPatchJit(Common::GetRip(context));
 }
-
+// ENDS HERE
 static bool PatchesIllegalInstructionHandler(void* context) {
     void* code_address = Common::GetRip(context);
 #if defined(_WIN32)
